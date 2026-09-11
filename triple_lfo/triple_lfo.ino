@@ -1,278 +1,386 @@
 /*
-HAGIWO MOD1 3ch LFO Ver1.0
-3ch output LFO.
+  TRIPLE LFO  --  3 channel LFO for the HAGIWO MOD1, one waveform per channel
+  Based on HAGIWO's "MOD1 3ch LFO Ver1.0".  MOD1 hardware and the original firmware by HAGIWO
+  (https://note.com/solder_state/n/nc05d8e8fd311).  Released under CC0.
 
---Pin assign---
-POT1  A0  LFO1 frequency
-POT2  A1  LFO2 frequency
-POT3  A2  LFO3 frequency
-F1    A3  frequency CV in (apply all ch LFO freq)
-F2    A4  LFO1 output
-F3    A5  LFO2 output
-F4    D11 LFO3 output
-BUTTON    change waveform
-LED       LFO1 output
-EEPROM    Saves select waveform
+  The original had three waveforms and all three channels had to share one of them, because a
+  single 1024 byte wave table lived in RAM.  Here every shape is computed from the phase instead,
+  so each channel carries its own waveform and only sine needs a table, in flash.
+
+  --Pin assign---
+  POT1  A0   LFO1 frequency   (hold BUTTON: LFO1 waveform)
+  POT2  A1   LFO2 frequency   (hold BUTTON: LFO2 waveform)
+  POT3  A2   LFO3 frequency   (hold BUTTON: LFO3 waveform)
+  F1    A3   frequency CV in, adds to all three channels
+  F2    D9   LFO1 out, 0..5V  (OC1A)
+  F3    D10  LFO2 out, 0..5V  (OC1B)
+  F4    D11  LFO3 out, 0..5V  (OC2A)
+  BUTTON D4  hold to edit waveforms.  A short tap does nothing
+  LED   D3   LFO1 output, or the waveform preview while editing
+  EEPROM     one waveform per channel, addresses 0, 1, 2
+
+  Waveforms, in pot order from fully CCW to fully CW:
+
+    0 TRIANGLE    1 SQUARE    2 SINE    3 SAW UP    4 SAW DOWN    5 STEPPED RANDOM
+
+  Holding the button freezes all three frequencies and hands the pots to the waveforms.  A pot
+  does nothing until it has moved 24 counts, so holding the button alone changes nothing.  The
+  LED previews the shape of the channel whose pot you last moved, at about 1.5 Hz; until you move
+  one it sits at a steady dim level to show you are in edit mode.  On release, a channel whose pot
+  you moved keeps its old frequency until that pot is turned back through where it started.
+
+  STEPPED RANDOM draws 8 new levels per cycle, one per eighth of the phase, each held flat.
+
+  Frequency is 0.02 to 5 Hz per pot, with the same range again added from F1, unchanged from the
+  original.  The engine runs at 2.5 kHz, 8 bit out through the 62.5 kHz PWM and the 1uF/1k
+  reconstruction filter on the MOD1 board.
 */
 
-// This program generates three independent LFO signals (D9, D10, D11) and an LED indicator (D3) at ~62.5kHz PWM.
-// Each LFO has a selectable waveform (Triangle, Square, Sine) chosen by a push button on D4 (INPUT_PULLUP).
-// The frequencies of the LFOs are controlled by three pots on A0, A1, A2, plus an offset on A3.
-// Now the maximum frequency is changed from 2Hz to 5Hz. (0.02 ~ 5Hz range)
-// Also, whenever the waveform changes, its type is saved to EEPROM, 
-// and upon startup, the saved waveform type is restored from EEPROM.
+#include <EEPROM.h>
+#include <avr/pgmspace.h>
 
-#include <EEPROM.h> // Include EEPROM library for read/write
+// ---------------------------------------------------------------- pins
+#define PIN_LED     3
+#define PIN_BUTTON  4
+#define PIN_OUT1    9    // OC1A
+#define PIN_OUT2    10   // OC1B
+#define PIN_OUT3    11   // OC2A
 
-// ---------------- Global Variables and Constants ----------------
-static const unsigned int TABLE_SIZE = 1024;    // 1024 points in one waveform cycle
-static const unsigned long UPDATE_INTERVAL_US = 400; // ~2500Hz LFO update rate
-static const unsigned long debounceDelay = 50UL;     // 50ms for switch debounce
+// ---------------------------------------------------------------- config
+#define TICK_US          400UL   // 2500 Hz engine tick
+#define NUM_WAVES        6
+#define DEBOUNCE_MS      30UL
+#define HOLD_MS          300UL   // button held this long enters waveform edit
+#define EE_SAVE_DELAY_MS 2000UL
 
-// Single wave table (8-bit resolution)
-uint8_t waveTable[TABLE_SIZE];
+#define ARM_DELTA        24      // pot travel needed before it takes a waveform
+#define PICKUP_WINDOW    12      // how close counts as catching the old position
+#define ZONE_HYST        12      // travel past a zone boundary before the zone changes
+#define MOVE_DELTA       3       // pot travel that counts as "this is the pot I am holding"
 
-// Current wave type: 0=Triangle, 1=Square, 2=Sine
-int waveType = 0; 
+#define EDIT_IDLE_LED    24      // steady dim while editing, before any pot has moved
 
-// Phase indexes for each LFO
-float lfoIndex1 = 0.0; 
-float lfoIndex2 = 0.0;
-float lfoIndex3 = 0.0;
+// Phase increment per tick.  0.02 Hz is 34360, and the pot adds 8363 per ADC count, which puts
+// a full clockwise pot at 5.0 Hz.  F1 contributes the same expression on top.
+#define INC_MIN          34360UL
+#define INC_PER_COUNT    8363UL
+#define PREVIEW_INC      2576980UL   // ~1.5 Hz for the LED preview
 
-// LFO frequencies for each channel
-float lfoFreq1 = 0.02;
-float lfoFreq2 = 0.02;
-float lfoFreq3 = 0.02;
+#define RND_SHIFT        13      // phase >> 13 gives 8 slices per cycle
 
-// Timing variables for LFO update
-unsigned long previousMicros = 0;
+enum { W_TRI = 0, W_SQR, W_SIN, W_SAWUP, W_SAWDN, W_RND };
 
-// Debounce variables
-int lastButtonState = HIGH;               // HIGH means not pressed (pull-up)
-unsigned long buttonPreviousMillis = 0;   // Last time we acknowledged a button press
+// ---------------------------------------------------------------- tables
+// (sin(2*pi*i/256) + 1) * 127.5, rounded
+static const uint8_t SINE_TAB[256] PROGMEM = {
+  128, 131, 134, 137, 140, 143, 146, 149,
+  152, 155, 158, 162, 165, 167, 170, 173,
+  176, 179, 182, 185, 188, 190, 193, 196,
+  198, 201, 203, 206, 208, 211, 213, 215,
+  218, 220, 222, 224, 226, 228, 230, 232,
+  234, 235, 237, 238, 240, 241, 243, 244,
+  245, 246, 248, 249, 250, 250, 251, 252,
+  253, 253, 254, 254, 254, 255, 255, 255,
+  255, 255, 255, 255, 254, 254, 254, 253,
+  253, 252, 251, 250, 250, 249, 248, 246,
+  245, 244, 243, 241, 240, 238, 237, 235,
+  234, 232, 230, 228, 226, 224, 222, 220,
+  218, 215, 213, 211, 208, 206, 203, 201,
+  198, 196, 193, 190, 188, 185, 182, 179,
+  176, 173, 170, 167, 165, 162, 158, 155,
+  152, 149, 146, 143, 140, 137, 134, 131,
+  128, 124, 121, 118, 115, 112, 109, 106,
+  103, 100,  97,  93,  90,  88,  85,  82,
+   79,  76,  73,  70,  67,  65,  62,  59,
+   57,  54,  52,  49,  47,  44,  42,  40,
+   37,  35,  33,  31,  29,  27,  25,  23,
+   21,  20,  18,  17,  15,  14,  12,  11,
+   10,   9,   7,   6,   5,   5,   4,   3,
+    2,   2,   1,   1,   1,   0,   0,   0,
+    0,   0,   0,   0,   1,   1,   1,   2,
+    2,   3,   4,   5,   5,   6,   7,   9,
+   10,  11,  12,  14,  15,  17,  18,  20,
+   21,  23,  25,  27,  29,  31,  33,  35,
+   37,  40,  42,  44,  47,  49,  52,  54,
+   57,  59,  62,  65,  67,  70,  73,  76,
+   79,  82,  85,  88,  90,  93,  97, 100,
+  103, 106, 109, 112, 115, 118, 121, 124
+};
 
-// ---------------- Function Prototypes ----------------
-void configurePWM();                       // Set up Timer1 and Timer2 for ~62.5kHz PWM
-void createWaveTable(int type);            // Re-generate wave table for the chosen wave type
-void createTriangleTable();           
-void createSquareTable();
-void createSineTable();
-float readFrequency(int analogPin);        // Maps analog input (0~1023) to 0.02~5.0Hz
-float readFrequencyOffset(int analogPin);  // Maps analog input (0~1023) to 0.02~5.0Hz
-void updateLFO(float &phaseIndex, float freq);
-void handleButtonInput();                  // Debounced button reading using millis()
+// ---------------------------------------------------------------- state
+static uint8_t  gWave[3] = { W_TRI, W_TRI, W_TRI };
 
-// ------------------------------------------------------
+// non blocking ADC round robin over A0..A3
+static uint16_t adcVal[4];
+static uint8_t  adcCh = 0;
+
+// engine.  potInc holds the pot's contribution and stops tracking while a channel is frozen;
+// the F1 CV is added live on every tick, so patched modulation keeps working during an edit.
+static uint32_t phase[3];
+static uint32_t potInc[3];
+static bool     frozen[3]  = { false, false, false };
+static uint16_t potEntry[3];
+static uint16_t potSeen[3];
+static int8_t   entrySign[3];
+static bool     armed[3];
+
+// stepped random.  Slot 3 belongs to the LED preview.
+static uint8_t  rndVal[4];
+static uint8_t  rndSlice[4];
+static uint32_t rng = 0x9E3779B9UL;
+
+// button and edit mode
+static uint8_t  btnLastRead = HIGH, btnStable = HIGH;
+static uint32_t btnChangedMs = 0, btnDownMs = 0;
+static bool     editing = false;
+static int8_t   lastTouched = -1;
+static uint32_t previewPhase = 0;
+
+// misc
+static uint32_t lastTickUs = 0;
+static uint32_t eeDirtyMs = 0;
+static bool     eeDirty = false;
+
+// ---------------------------------------------------------------- helpers
+static inline uint32_t rnd32() {
+  rng ^= rng << 13;
+  rng ^= rng >> 17;
+  rng ^= rng << 5;
+  return rng;
+}
+static inline uint8_t rnd8() { return (uint8_t)(rnd32() >> 24); }
+
+static inline uint32_t incFromRaw(uint16_t raw) {
+  return INC_MIN + (uint32_t)raw * INC_PER_COUNT;
+}
+
+// OC2B at 0 still leaks a 1/256 sliver, so a square wave preview would never look fully off
+static inline void ledSet(uint8_t v) {
+  if (v == 0) {
+    TCCR2A &= (uint8_t)~(1 << COM2B1);
+    PORTD  &= (uint8_t)~(1 << PD3);
+  } else {
+    TCCR2A |= (1 << COM2B1);
+    OCR2B = v;
+  }
+}
+
+static void markDirty() { eeDirty = true; eeDirtyMs = millis(); }
+
+// ---------------------------------------------------------------- waveforms
+// slot picks the stepped random state: 0..2 are the channels, 3 is the LED preview
+static uint8_t renderWave(uint8_t w, uint16_t p16, uint8_t slot) {
+  switch (w) {
+    case W_TRI:
+      return (p16 < 32768) ? (uint8_t)(p16 >> 7)
+                           : (uint8_t)(255 - ((p16 - 32768) >> 7));
+    case W_SQR:
+      return (p16 < 32768) ? 0 : 255;
+    case W_SIN:
+      return pgm_read_byte(&SINE_TAB[p16 >> 8]);
+    case W_SAWUP:
+      return (uint8_t)(p16 >> 8);
+    case W_SAWDN:
+      return (uint8_t)(255 - (p16 >> 8));
+    default: {                                  // W_RND
+      uint8_t s = (uint8_t)(p16 >> RND_SHIFT);
+      if (s != rndSlice[slot]) {
+        rndSlice[slot] = s;
+        rndVal[slot] = rnd8();
+      }
+      return rndVal[slot];
+    }
+  }
+}
+
+// ---------------------------------------------------------------- setup
+static void configurePWM() {
+  // Timer1, pins 9 and 10: fast PWM 8 bit, no prescaler -> 62.5 kHz
+  TCCR1A = (1 << WGM10) | (1 << COM1A1) | (1 << COM1B1);
+  TCCR1B = (1 << WGM12) | (1 << CS10);
+
+  // Timer2, pins 11 and 3: fast PWM, no prescaler -> 62.5 kHz
+  TCCR2A = (1 << WGM20) | (1 << WGM21) | (1 << COM2A1) | (1 << COM2B1);
+  TCCR2B = (1 << CS20);
+}
+
 void setup() {
-  // Configure I/O pins
-  pinMode(9, OUTPUT);    // LFO1 (OCR1A)
-  pinMode(10, OUTPUT);   // LFO2 (OCR1B)
-  pinMode(11, OUTPUT);   // LFO3 (OCR2A)
-  pinMode(3, OUTPUT);    // LED indicator (OCR2B)
-  pinMode(4, INPUT_PULLUP); // Push button (pull-up); press => LOW
+  pinMode(PIN_OUT1, OUTPUT);
+  pinMode(PIN_OUT2, OUTPUT);
+  pinMode(PIN_OUT3, OUTPUT);
+  pinMode(PIN_LED, OUTPUT);
+  pinMode(PIN_BUTTON, INPUT_PULLUP);
 
-  // Configure Timer1 & Timer2 to ~62.5kHz PWM
   configurePWM();
 
-  // Read waveType from EEPROM (address 0)
-  int storedWaveType = EEPROM.read(0);  // Range could be 0~255
-  // Validate the stored value (must be 0,1,2); if invalid, fallback to 0
-  if (storedWaveType < 0 || storedWaveType > 2) {
-    storedWaveType = 0; 
-  }
-  waveType = storedWaveType;
+  uint32_t s = 0;
+  for (uint8_t i = 0; i < 16; i++) s = (s << 1) ^ (uint32_t)(analogRead(A6) & 1);
+  rng = s ? (s ^ micros()) : 0x9E3779B9UL;
 
-  // Create the initial wave table based on EEPROM
-  createWaveTable(waveType);
+  // One waveform per channel.  A chip carrying the original firmware has a valid byte at 0 and
+  // junk at 1 and 2, so anything out of range falls back to triangle.
+  for (uint8_t ch = 0; ch < 3; ch++) {
+    uint8_t w = EEPROM.read(ch);
+    gWave[ch] = (w < NUM_WAVES) ? w : (uint8_t)W_TRI;
+  }
+
+  // Prime the filtered ADC values before taking the converter over, so the first tick already
+  // has real pot positions instead of walking up from zero.
+  adcVal[0] = analogRead(A0);
+  adcVal[1] = analogRead(A1);
+  adcVal[2] = analogRead(A2);
+  adcVal[3] = analogRead(A3);
+  for (uint8_t ch = 0; ch < 3; ch++) potInc[ch] = incFromRaw(adcVal[ch]);
+
+  DIDR0 = (1 << ADC0D) | (1 << ADC1D) | (1 << ADC2D) | (1 << ADC3D);
+  adcCh = 0;
+  ADMUX  = (1 << REFS0) | adcCh;
+  ADCSRA |= (1 << ADSC);
+
+  lastTickUs = micros();
 }
 
-// ------------------------------------------------------
+// ---------------------------------------------------------------- ADC
+static inline void serviceADC() {
+  if (ADCSRA & (1 << ADSC)) return;
+  uint16_t v = ADC;
+  adcVal[adcCh] = (uint16_t)((adcVal[adcCh] * 3UL + v) >> 2);   // de-jitter
+  adcCh = (uint8_t)((adcCh + 1) & 3);
+  ADMUX = (1 << REFS0) | adcCh;
+  ADCSRA |= (1 << ADSC);
+}
+
+// ---------------------------------------------------------------- edit mode
+// Pot travel splits into NUM_WAVES zones, with hysteresis so a pot resting on a boundary does
+// not dither between two shapes.
+static uint8_t zoneFor(uint8_t ch, uint16_t raw) {
+  uint8_t cur = gWave[ch];
+  uint8_t z = (uint8_t)(((uint32_t)raw * NUM_WAVES) >> 10);
+  if (z == cur) return cur;
+  uint16_t bound = (uint16_t)((((uint32_t)(z > cur ? z : cur)) << 10) / NUM_WAVES);
+  if (z > cur) return (raw >= bound + ZONE_HYST) ? z : cur;
+  return (raw + ZONE_HYST <= bound) ? z : cur;
+}
+
+static void beginEdit() {
+  editing = true;
+  lastTouched = -1;
+  previewPhase = 0;
+  for (uint8_t ch = 0; ch < 3; ch++) {
+    potEntry[ch] = adcVal[ch];
+    potSeen[ch]  = adcVal[ch];
+    armed[ch] = false;
+    frozen[ch] = true;          // potInc stops tracking and holds its current value
+  }
+}
+
+static void endEdit() {
+  editing = false;
+  for (uint8_t ch = 0; ch < 3; ch++) {
+    if (armed[ch]) {
+      // stay frozen until the pot is turned back through where the edit started
+      entrySign[ch] = (adcVal[ch] >= potEntry[ch]) ? 1 : -1;
+    } else {
+      frozen[ch] = false;
+    }
+  }
+}
+
+static void serviceEdit() {
+  for (uint8_t ch = 0; ch < 3; ch++) {
+    int16_t d = (int16_t)adcVal[ch] - (int16_t)potEntry[ch];
+    if (!armed[ch]) {
+      if (d < ARM_DELTA && d > -ARM_DELTA) continue;
+      armed[ch] = true;
+      lastTouched = (int8_t)ch;
+    }
+
+    int16_t moved = (int16_t)adcVal[ch] - (int16_t)potSeen[ch];
+    if (moved > MOVE_DELTA || moved < -MOVE_DELTA) {
+      potSeen[ch] = adcVal[ch];
+      lastTouched = (int8_t)ch;
+    }
+
+    uint8_t z = zoneFor(ch, adcVal[ch]);
+    if (z != gWave[ch]) {
+      gWave[ch] = z;
+      markDirty();
+    }
+  }
+}
+
+// A frozen pot goes live again once it reaches, or passes back through, its entry position.
+static void servicePickup() {
+  for (uint8_t ch = 0; ch < 3; ch++) {
+    if (!frozen[ch]) continue;
+    int16_t d = (int16_t)adcVal[ch] - (int16_t)potEntry[ch];
+    if (d <= PICKUP_WINDOW && d >= -PICKUP_WINDOW) frozen[ch] = false;
+    else if ((entrySign[ch] > 0) != (d > 0))       frozen[ch] = false;
+  }
+}
+
+// ---------------------------------------------------------------- button
+static void serviceButton() {
+  uint32_t now = millis();
+  uint8_t  r = digitalRead(PIN_BUTTON);
+
+  if (r != btnLastRead) { btnLastRead = r; btnChangedMs = now; }
+  else if (r != btnStable && (now - btnChangedMs) >= DEBOUNCE_MS) {
+    btnStable = r;
+    if (r == LOW) btnDownMs = now;      // a release shorter than HOLD_MS does nothing
+    else if (editing) endEdit();
+  }
+
+  if (btnStable == LOW && !editing && (now - btnDownMs) >= HOLD_MS) beginEdit();
+}
+
+// ---------------------------------------------------------------- engine
+static void servicePots() {
+  for (uint8_t ch = 0; ch < 3; ch++) {
+    if (!frozen[ch]) potInc[ch] = incFromRaw(adcVal[ch]);
+  }
+}
+
+static void outputTick() {
+  uint32_t cvInc = incFromRaw(adcVal[3]);
+
+  phase[0] += potInc[0] + cvInc;
+  phase[1] += potInc[1] + cvInc;
+  phase[2] += potInc[2] + cvInc;
+
+  uint8_t o1 = renderWave(gWave[0], (uint16_t)(phase[0] >> 16), 0);
+  uint8_t o2 = renderWave(gWave[1], (uint16_t)(phase[1] >> 16), 1);
+  uint8_t o3 = renderWave(gWave[2], (uint16_t)(phase[2] >> 16), 2);
+
+  OCR1A = o1;
+  OCR1B = o2;
+  OCR2A = o3;
+
+  if (!editing) {
+    ledSet(o1);
+  } else {
+    previewPhase += PREVIEW_INC;
+    if (lastTouched < 0) ledSet(EDIT_IDLE_LED);
+    else ledSet(renderWave(gWave[lastTouched], (uint16_t)(previewPhase >> 16), 3));
+  }
+}
+
+// ---------------------------------------------------------------- loop
 void loop() {
-  // Handle push button input (debounce) to change the waveform
-  handleButtonInput();
+  serviceADC();
+  serviceButton();
+  if (editing) serviceEdit();
+  else         servicePickup();
+  servicePots();
 
-  // Update LFO signals at ~2500Hz
-  unsigned long currentMicros = micros();
-  if (currentMicros - previousMicros >= UPDATE_INTERVAL_US) {
-    previousMicros = currentMicros;
-
-    // Read pot values for each LFO base frequency
-    float baseFreq1 = readFrequency(A0);
-    float baseFreq2 = readFrequency(A1);
-    float baseFreq3 = readFrequency(A2);
-
-    // Read offset from A3 (0~5V => 0.02~5.0Hz)
-    float freqOffset = readFrequencyOffset(A3);
-
-    // Combine them: baseFreq + offset
-    lfoFreq1 = baseFreq1 + freqOffset;
-    lfoFreq2 = baseFreq2 + freqOffset;
-    lfoFreq3 = baseFreq3 + freqOffset;
-
-    // Update phase indexes
-    updateLFO(lfoIndex1, lfoFreq1);
-    updateLFO(lfoIndex2, lfoFreq2);
-    updateLFO(lfoIndex3, lfoFreq3);
-
-    // Get table positions (integer) from phase indexes
-    int tablePos1 = (int)lfoIndex1 % TABLE_SIZE;
-    int tablePos2 = (int)lfoIndex2 % TABLE_SIZE;
-    int tablePos3 = (int)lfoIndex3 % TABLE_SIZE;
-
-    // Read waveTable for each LFO
-    uint8_t outputVal1 = waveTable[tablePos1];
-    uint8_t outputVal2 = waveTable[tablePos2];
-    uint8_t outputVal3 = waveTable[tablePos3];
-
-    // Set duty cycles directly via OCR registers
-    // LFO1 -> OCR1A (Pin 9)
-    // LFO2 -> OCR1B (Pin 10)
-    // LFO3 -> OCR2A (Pin 11)
-    // LED indicator (same as LFO1) -> OCR2B (Pin 3)
-
-    OCR1A = outputVal1;  
-    OCR1B = outputVal2;  
-    OCR2A = outputVal3;  
-    OCR2B = outputVal1;  // LED shows LFO1's output
+  if (eeDirty && (millis() - eeDirtyMs) > EE_SAVE_DELAY_MS) {
+    eeDirty = false;
+    for (uint8_t ch = 0; ch < 3; ch++) EEPROM.update(ch, gWave[ch]);
   }
+
+  uint32_t now = micros();
+  if ((uint32_t)(now - lastTickUs) < TICK_US) return;
+  lastTickUs += TICK_US;
+  if ((uint32_t)(now - lastTickUs) > TICK_US * 4) lastTickUs = now;
+  outputTick();
 }
-
-// ------------------------------------------------------
-// Configure Timer1 (16-bit) and Timer2 (8-bit) for ~62.5kHz PWM
-void configurePWM() {
-  // ---- Timer1 setup (Pins 9=OCR1A, 10=OCR1B) ----
-  // Fast PWM 8-bit mode: WGM10=1, WGM11=0, WGM12=1, WGM13=0
-  // Non-inverting for OCR1A, OCR1B: COM1A1=1, COM1B1=1
-  // No prescaler: CS10=1
-  TCCR1A = 0; 
-  TCCR1B = 0;
-  TCCR1A |= (1 << WGM10) | (1 << COM1A1) | (1 << COM1B1);  
-  TCCR1B |= (1 << WGM12) | (1 << CS10);                   
-
-  // ---- Timer2 setup (Pins 3=OCR2B, 11=OCR2A) ----
-  // Fast PWM mode (0xFF): WGM20=1, WGM21=1, WGM22=0
-  // Non-inverting for OCR2A, OCR2B: COM2A1=1, COM2B1=1
-  // No prescaler: CS20=1
-  TCCR2A = 0; 
-  TCCR2B = 0; 
-  TCCR2A |= (1 << WGM20) | (1 << WGM21) | (1 << COM2A1) | (1 << COM2B1); 
-  TCCR2B |= (1 << CS20); 
-}
-
-// ------------------------------------------------------
-// Debounced button input using millis()
-void handleButtonInput() {
-  // Read current button state (LOW when pressed)
-  int reading = digitalRead(4);
-  unsigned long currentMillis = millis();
-
-  // Check if enough time has passed to confirm a new button event
-  if (currentMillis - buttonPreviousMillis > debounceDelay) {
-    // Detect transition from HIGH to LOW (button press)
-    if (reading == LOW && lastButtonState == HIGH) {
-      // Cycle waveType: 0->1->2->0->...
-      waveType = (waveType + 1) % 3;
-
-      // Regenerate the wave table for the new wave type
-      createWaveTable(waveType);
-
-      // Save the new waveType to EEPROM
-      EEPROM.write(0, waveType);
-
-      // Update the timestamp of this confirmed press
-      buttonPreviousMillis = currentMillis;
-    }
-  }
-  // Update for next iteration
-  lastButtonState = reading;
-}
-
-// ------------------------------------------------------
-// Create wave table based on waveType
-void createWaveTable(int type) {
-  switch (type) {
-    case 0: // Triangle
-      createTriangleTable();
-      break;
-    case 1: // Square
-      createSquareTable();
-      break;
-    default: // Sine
-      createSineTable();
-      break;
-  }
-}
-
-// ------------------------------------------------------
-// Create a triangle wave in waveTable (8-bit range 0~255)
-void createTriangleTable() {
-  // First half rising 0->255, second half falling 255->0
-  for (int i = 0; i < TABLE_SIZE; i++) {
-    if (i < (TABLE_SIZE / 2)) {
-      float val = (255.0f * i) / (TABLE_SIZE / 2);
-      waveTable[i] = (uint8_t)val;
-    } else {
-      int j = i - (TABLE_SIZE / 2);
-      float val = 255.0f - (255.0f * j) / (TABLE_SIZE / 2);
-      waveTable[i] = (uint8_t)val;
-    }
-  }
-}
-
-// ------------------------------------------------------
-// Create a square wave in waveTable (8-bit range 0 or 255)
-void createSquareTable() {
-  // First half of cycle = 0, second half = 255
-  for (int i = 0; i < TABLE_SIZE; i++) {
-    if (i < (TABLE_SIZE / 2)) {
-      waveTable[i] = 0;
-    } else {
-      waveTable[i] = 255;
-    }
-  }
-}
-
-// ------------------------------------------------------
-// Create a sine wave in waveTable (8-bit range 0~255)
-void createSineTable() {
-  for (int i = 0; i < TABLE_SIZE; i++) {
-    // Angle from 0 to 2*pi
-    float angle = 2.0f * 3.14159265359f * ((float)i / (float)TABLE_SIZE);
-    // Map sin() from -1~+1 to 0~255
-    float sineVal = (sin(angle) + 1.0f) * 127.5f;
-    if (sineVal < 0.0f)   sineVal = 0.0f;
-    if (sineVal > 255.0f) sineVal = 255.0f;
-    waveTable[i] = (uint8_t)sineVal;
-  }
-}
-
-// ------------------------------------------------------
-// Map analog input (0~1023) to 0.02~5.0Hz
-float readFrequency(int analogPin) {
-  int rawVal = analogRead(analogPin); 
-  float fMin = 0.02f;
-  float fMax = 5.0f;      // Changed upper limit to 5.0Hz
-  float freq = fMin + (fMax - fMin) * (rawVal / 1023.0f);
-  return freq;
-}
-
-// ------------------------------------------------------
-// Map analog input (0~1023) to 0.02~5.0Hz (offset)
-float readFrequencyOffset(int analogPin) {
-  int rawVal = analogRead(analogPin);
-  float fMin = 0.02f;
-  float fMax = 5.0f;      // Changed upper limit to 5.0Hz
-  float offset = fMin + (fMax - fMin) * (rawVal / 1023.0f);
-  return offset;
-}
-
-// ------------------------------------------------------
-// Update LFO phase index based on frequency
-void updateLFO(float &phaseIndex, float freq) {
-  // ~2500 updates per second => increment = freq * (TABLE_SIZE / 2500)
-  float increment = freq * ((float)TABLE_SIZE / 2500.0f);
-  phaseIndex += increment;
-  // The table access uses % TABLE_SIZE on int cast, so no clamp needed here
-}
-

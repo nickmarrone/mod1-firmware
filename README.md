@@ -1,14 +1,15 @@
 # MOD1 firmwares
 
-Two firmwares for [HAGIWO's MOD1](https://note.com/solder_state/n/nc05d8e8fd311), the Arduino
+Three firmwares for [HAGIWO's MOD1](https://note.com/solder_state/n/nc05d8e8fd311), the Arduino
 Nano based general-purpose Eurorack CV module.
 
 | Firmware | What it is |
 |---|---|
 | [`smooth_random/`](smooth_random) | Three independent smooth random voltages, five algorithms, one rate pot per channel |
 | [`clepz/`](clepz) | Step CV / random / smooth-noise LFO generator, inspired by the interface of Noise Engineering's Clep Diaz |
+| [`triple_lfo/`](triple_lfo) | Three independent LFOs, six waveforms, one per channel. Extends HAGIWO's own 3ch LFO |
 
-Both target `arduino:avr:nano` and are single-file sketches, so they work with the Arduino IDE
+All three target `arduino:avr:nano` and are single-file sketches, so they work with the Arduino IDE
 unchanged.
 
 ## The hardware
@@ -44,7 +45,7 @@ at 62.5 kHz, the same approach as HAGIWO's own firmwares.
 
 ```bash
 arduino-cli core update-index && arduino-cli core install arduino:avr
-tools/build.sh                     # compiles both, prints flash / RAM
+tools/build.sh                     # compiles all three, prints flash / RAM
 ```
 
 Current usage on the ATmega328P (30720 B flash, 2048 B RAM):
@@ -52,7 +53,8 @@ Current usage on the ATmega328P (30720 B flash, 2048 B RAM):
 | Firmware | Flash | RAM |
 |---|---|---|
 | `smooth_random` | 7058 B (22 %) | 179 B (8 %) |
-| `clepz` | 4934 B (16 %) | 140 B (6 %) |
+| `clepz` | 4886 B (15 %) | 140 B (6 %) |
+| `triple_lfo` | 3682 B (11 %) | 104 B (5 %) |
 
 ## Uploading
 
@@ -65,6 +67,7 @@ Most clone Nanos ship the older bootloader and need
 
 ## Credits
 
-MOD1 hardware and the original firmware family by [HAGIWO](https://note.com/solder_state). `clepz`
-is an independent homage to the *interface* of Noise Engineering's Clep Diaz — it is not affiliated
-with, endorsed by, or derived from any Noise Engineering code. Released under CC0.
+MOD1 hardware and the original firmware family by [HAGIWO](https://note.com/solder_state).
+`triple_lfo` is derived from HAGIWO's own *MOD1 3ch LFO Ver1.0*. `clepz` is an independent homage
+to the *interface* of Noise Engineering's Clep Diaz — it is not affiliated with, endorsed by, or
+derived from any Noise Engineering code. Released under CC0.
