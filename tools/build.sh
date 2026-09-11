@@ -18,7 +18,7 @@ if ! command -v "$CLI" >/dev/null 2>&1; then
 fi
 
 SKETCHES=("$@")
-if [ ${#SKETCHES[@]} -eq 0 ]; then SKETCHES=(smooth_random clepz); fi
+if [ ${#SKETCHES[@]} -eq 0 ]; then SKETCHES=(smooth_random clepz triple_lfo); fi
 
 status=0
 for s in "${SKETCHES[@]}"; do
