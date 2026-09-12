@@ -2,29 +2,39 @@
   SMOOTH RANDOM  --  3 channel smooth random voltage generator for the HAGIWO MOD1
   Released under CC0.  MOD1 hardware by HAGIWO (https://note.com/solder_state/n/nc05d8e8fd311)
 
-  Three independent smooth random CVs, one per output jack.  Nothing ever steps or jumps:
-  every algorithm is continuous, so the outputs are safe on filter cutoffs, VCA levels,
-  wavefolders and anything else that would click on a hard transition.
+  Three smooth random CVs, one per output jack, each with its own algorithm.  Nothing ever
+  steps or jumps: every algorithm is continuous, so the outputs are safe on filter cutoffs,
+  VCA levels, wavefolders and anything else that would click on a hard transition.
 
   --Pin assign---
-  POT1  A0   channel 1 rate   (LORENZ mode: master speed)
-  POT2  A1   channel 2 rate   (LORENZ mode: rho  / chaos shape)
-  POT3  A2   channel 3 rate   (LORENZ mode: beta / chaos shape)
+  POT1  A0   channel 1 rate   (hold BUTTON: channel 1 algorithm.  LORENZ: master speed)
+  POT2  A1   channel 2 rate   (hold BUTTON: channel 2 algorithm.  LORENZ: rho)
+  POT3  A2   channel 3 rate   (hold BUTTON: channel 3 algorithm.  LORENZ: beta)
   F1    A3   global rate CV in, 0..5V, adds up to about +4 octaves to all channels
   F2    D9   channel 1 out, 0..5V
   F3    D10  channel 2 out, 0..5V
   F4    D11  channel 3 out, 0..5V
-  BUTTON D4  short press: next random type (saved to EEPROM)
-  LED   D3   which type is selected
+  BUTTON D4  hold to edit algorithms; hold longer with no pot moved to toggle LORENZ
+  LED   D3   channel 1 output, or the algorithm indicator while editing
+  EEPROM     one algorithm per channel plus the LORENZ flag
 
-  Type                LED
-  0 DRIFT             off
-  1 WANDER            slow triangle fade (1 Hz)
-  2 TURBULENCE        fast triangle fade (4 Hz)
-  3 LORENZ            steady dim
-  4 HOLD              steady on
+  Algorithms, in pot order from fully CCW to fully CW:
 
-  Generator runs at 2 kHz, 16 bit internally, 8 bit out through the 62.5 kHz PWM and the
+    0 DRIFT    1 WANDER    2 TURBULENCE    3 HOLD
+
+  Holding the button freezes all three rates and hands the pots to the algorithms.  A pot does
+  nothing until it has moved 24 counts, so holding the button alone changes nothing.  The LED
+  shows the algorithm of the channel whose pot you last moved; until you move one it blinks dim
+  to show you are in edit mode.  On release, a channel whose pot you moved keeps its old rate
+  until that pot is turned back through where it started.
+
+  LORENZ is not one of the four.  It is a single chaotic system whose x, y and z drive all three
+  outputs at once, so it takes the whole module and all three pots.  Hold the button past 1.5 s
+  without touching a pot to toggle it; the LED blinks twice going in and once coming out.  The
+  per channel algorithms are remembered while it runs, and the rates the pots had before it are
+  handed back with the same pickup rule an edit uses.
+
+  Generator runs at 1 kHz, 16 bit internally, 8 bit out through the 62.5 kHz PWM and the
   1uF/1k reconstruction filter already on the MOD1 board.
 */
 
@@ -41,16 +51,34 @@
 // ---------------------------------------------------------------- config
 #define TICK_US        1000UL  // 1 kHz generator tick.  The MOD1's output filter sits
                                // at ~159 Hz, so 1 kHz is still six times the corner.
-#define NUM_TYPES      5
-#define EE_ADDR_TYPE   0
+#define NUM_ALGOS      4
+#define DEBOUNCE_MS    30UL
+#define HOLD_MS        300UL   // button held this long enters algorithm edit
+#define LORENZ_HOLD_MS 1500UL  // ... and this long, with no pot moved, toggles LORENZ
+#define EE_SAVE_DELAY_MS 2000UL
+
+#define ARM_DELTA      24      // pot travel needed before it takes an algorithm
+#define PICKUP_WINDOW  12      // how close counts as catching the old position
+#define ZONE_HYST      12      // travel past a zone boundary before the zone changes
+#define MOVE_DELTA     3       // pot travel that counts as "this is the pot I am holding"
+
+#define EDIT_IDLE_LED  24      // dim level, for the edit idle blink and for DRIFT
+#define BLINK_MS       120UL   // one on or off phase of the LORENZ confirmation blink
+
+// EEPROM map.  Byte 1 stays the power up seed counter it has always been.
+#define EE_ADDR_ALGO1  0
 #define EE_ADDR_SEED   1
-#define DEBOUNCE_MS    40UL
+#define EE_ADDR_ALGO2  2
+#define EE_ADDR_ALGO3  3
+#define EE_ADDR_LORENZ 4
+#define EE_ADDR_VER    5
+#define EE_VERSION     2
 
 // Rate CV depth: full 5V adds this many table indices (1024 indices span ~11 octaves,
 // so 373 indices is very close to +4 octaves).
 #define CV_DEPTH       373L
 
-enum { T_DRIFT = 0, T_WANDER, T_TURBULENCE, T_LORENZ, T_HOLD };
+enum { T_DRIFT = 0, T_WANDER, T_TURBULENCE, T_HOLD };
 
 // ---------------------------------------------------------------- tables
 // Phase increment per 1 ms tick, exponential 0.01 Hz .. 20 Hz (33 entries, interpolated)
@@ -102,13 +130,23 @@ static const uint16_t SMOOTH_TAB[257] PROGMEM = {
   65347, 65391, 65429, 65461, 65488, 65508, 65523, 65532,
   65535
 };
-
 // ---------------------------------------------------------------- state
-static uint8_t  gType = T_DRIFT;
+static uint8_t  gAlgo[3] = { T_DRIFT, T_DRIFT, T_DRIFT };
+static bool     gLorenz  = false;
 
 // non blocking ADC round robin over A0..A3
 static uint16_t adcVal[4] = { 0, 0, 0, 0 };
 static uint8_t  adcCh = 0;
+
+// potVal is what the rate engine sees.  It tracks the pots except while a channel is frozen,
+// which is how an edit and a LORENZ excursion both leave the old rates intact.  LORENZ itself
+// reads adcVal live, because there the pots really are speed, rho and beta.
+static uint16_t potVal[3];
+static bool     frozen[3] = { false, false, false };
+static uint16_t potEntry[3];
+static uint16_t potSeen[3];
+static int8_t   entrySign[3];
+static bool     armed[3];
 
 // DRIFT / HOLD / TURBULENCE share this segment generator.
 // TURBULENCE uses three octaves per channel, DRIFT and HOLD use octave 0 only.
@@ -130,12 +168,23 @@ static uint16_t lorPrev[3], lorCur[3];
 static uint8_t  lorSub = 0;
 static uint8_t  lorParamDiv = 0;
 
+// button and edit mode
+static uint8_t  btnLastRead = HIGH, btnStable = HIGH;
+static uint32_t btnChangedMs = 0, btnDownMs = 0;
+static bool     editing = false;
+static bool     longFired = false;
+static int8_t   lastTouched = -1;
+
+// LED: channel 1's last output, and the LORENZ confirmation blink
+static uint8_t  ledLevel = 0;
+static uint8_t  blinkPhases = 0;
+static uint32_t blinkMs = 0;
+
 // misc
 static uint32_t rng = 0x2545F491UL;
 static uint32_t lastTickUs = 0;
-static uint32_t btnChangedMs = 0;
-static uint8_t  btnLastRead = HIGH;
-static uint8_t  btnStable = HIGH;
+static uint32_t eeDirtyMs = 0;
+static bool     eeDirty = false;
 
 // ---------------------------------------------------------------- helpers
 static inline uint32_t rnd32() {
@@ -166,10 +215,11 @@ static uint32_t incFromIndex(int16_t idx) {
   return a + (uint32_t)(((b - a) * (uint32_t)f) >> 5);
 }
 
-// pot + global rate CV, clamped to the table range
-static inline int16_t rateIndex(uint8_t ch) {
-  return (int16_t)min(1023L, (long)adcVal[ch] + (((long)adcVal[3] * CV_DEPTH) >> 10));
+// pot value + global rate CV, clamped to the table range
+static inline int16_t rateIndexFrom(uint16_t pot) {
+  return (int16_t)min(1023L, (long)pot + (((long)adcVal[3] * CV_DEPTH) >> 10));
 }
+static inline int16_t rateIndex(uint8_t ch) { return rateIndexFrom(potVal[ch]); }
 
 // advance one noise segment; returns the eased value between the two endpoints.
 // easeFull = true  -> glide across the whole segment (DRIFT / TURBULENCE)
@@ -194,10 +244,12 @@ static inline uint16_t segStep(uint8_t ch, uint8_t oct, uint32_t inc, bool easeF
 
 static inline void writeOut(uint8_t ch, uint16_t v) {
   uint8_t duty = (uint8_t)(v >> 8);
-  if (ch == 0)      OCR1A = duty;
+  if (ch == 0)      { OCR1A = duty; ledLevel = duty; }
   else if (ch == 1) OCR1B = duty;
   else              OCR2A = duty;
 }
+
+static void markDirty() { eeDirty = true; eeDirtyMs = millis(); }
 
 // ---------------------------------------------------------------- setup
 static void updateLorenzParams();
@@ -221,6 +273,24 @@ static void seedRng() {
   s ^= ((uint32_t)stored << 24) ^ ((uint32_t)stored << 7) ^ micros();
   if (s == 0) s = 0x2545F491UL;
   rng = s;
+}
+
+// The old firmware kept one global type at byte 0 and nothing else, so there is no way to tell
+// its byte 0 from a per channel one.  A version stamp settles it: an unrecognised layout is
+// rewritten to defaults once, and everything after that is read back as written.
+static void loadSettings() {
+  if (EEPROM.read(EE_ADDR_VER) != EE_VERSION) {
+    EEPROM.update(EE_ADDR_ALGO1,  T_DRIFT);
+    EEPROM.update(EE_ADDR_ALGO2,  T_DRIFT);
+    EEPROM.update(EE_ADDR_ALGO3,  T_DRIFT);
+    EEPROM.update(EE_ADDR_LORENZ, 0);
+    EEPROM.update(EE_ADDR_VER,    EE_VERSION);
+  }
+  gAlgo[0] = EEPROM.read(EE_ADDR_ALGO1);
+  gAlgo[1] = EEPROM.read(EE_ADDR_ALGO2);
+  gAlgo[2] = EEPROM.read(EE_ADDR_ALGO3);
+  for (uint8_t ch = 0; ch < 3; ch++) if (gAlgo[ch] >= NUM_ALGOS) gAlgo[ch] = T_DRIFT;
+  gLorenz = EEPROM.read(EE_ADDR_LORENZ) ? true : false;
 }
 
 static void initChannels() {
@@ -247,14 +317,30 @@ void setup() {
 
   seedRng();                        // uses analogRead(), so do it before we take over the ADC
   configurePWM();
-
-  uint8_t t = EEPROM.read(EE_ADDR_TYPE);
-  gType = (t < NUM_TYPES) ? t : (uint8_t)T_DRIFT;
-
+  loadSettings();
   initChannels();
+
+  // Prime the filtered ADC values before taking the converter over, so the first tick already
+  // has real pot positions instead of walking up from zero.
+  adcVal[0] = analogRead(A0);
+  adcVal[1] = analogRead(A1);
+  adcVal[2] = analogRead(A2);
+  adcVal[3] = analogRead(A3);
+  for (uint8_t ch = 0; ch < 3; ch++) {
+    potVal[ch]   = adcVal[ch];
+    potEntry[ch] = adcVal[ch];
+    potSeen[ch]  = adcVal[ch];
+    armed[ch]    = false;
+    // Booting straight into LORENZ: treat these positions as the rates to hand back on the way
+    // out, otherwise the first exit would jump to wherever rho and beta left the pots.
+    frozen[ch]   = gLorenz;
+  }
+
   updateLorenzParams();            // so LORENZ has sane gains before its first refresh
 
-  ADMUX  = (1 << REFS0) | 0;        // AVcc reference, start on A0
+  DIDR0 = (1 << ADC0D) | (1 << ADC1D) | (1 << ADC2D) | (1 << ADC3D);
+  adcCh = 0;
+  ADMUX  = (1 << REFS0) | adcCh;    // AVcc reference, start on A0
   ADCSRA |= (1 << ADSC);
   lastTickUs = micros();
 }
@@ -262,29 +348,103 @@ void setup() {
 // ---------------------------------------------------------------- ADC
 static inline void serviceADC() {
   if (ADCSRA & (1 << ADSC)) return;         // still converting
-  adcVal[adcCh] = ADC;
-  adcCh = (uint8_t)((adcCh + 1) & 3);
+  uint16_t v = ADC;
+  adcVal[adcCh] = (uint16_t)((adcVal[adcCh] * 3UL + v) >> 2);   // de-jitter, so a pot resting
+  adcCh = (uint8_t)((adcCh + 1) & 3);                           // on a zone boundary stays put
   ADMUX = (1 << REFS0) | adcCh;             // A0..A3 are mux channels 0..3
   ADCSRA |= (1 << ADSC);
 }
 
-// ---------------------------------------------------------------- button
-static inline void serviceButton() {
-  uint32_t now = millis();
-  uint8_t  r = digitalRead(PIN_BUTTON);
-  if (r != btnLastRead) {                 // reading moved: restart the settle timer
-    btnLastRead = r;
-    btnChangedMs = now;
-    return;
+// ---------------------------------------------------------------- pots and edit mode
+static void freezePots() {
+  for (uint8_t ch = 0; ch < 3; ch++) {
+    potEntry[ch] = adcVal[ch];
+    potSeen[ch]  = adcVal[ch];
+    armed[ch] = false;
+    frozen[ch] = true;          // potVal stops tracking and holds its current value
   }
-  if (r != btnStable && (now - btnChangedMs) >= DEBOUNCE_MS) {
-    btnStable = r;
-    if (r == LOW) {                       // confirmed press
-      gType = (uint8_t)((gType + 1) % NUM_TYPES);
-      EEPROM.update(EE_ADDR_TYPE, gType);
+}
+
+// Hand the pots back.  One that was moved stays frozen at its old rate until it is turned back
+// through where it started; one that was left alone goes live again straight away.
+static void releasePots() {
+  for (uint8_t ch = 0; ch < 3; ch++) {
+    if (!frozen[ch]) continue;
+    int16_t d = (int16_t)adcVal[ch] - (int16_t)potEntry[ch];
+    if (d > PICKUP_WINDOW || d < -PICKUP_WINDOW) entrySign[ch] = (d > 0) ? 1 : -1;
+    else frozen[ch] = false;
+  }
+}
+
+static void servicePots() {
+  if (gLorenz) return;          // the pots are speed, rho and beta; the rates hold where they were
+  for (uint8_t ch = 0; ch < 3; ch++) {
+    if (!frozen[ch]) potVal[ch] = adcVal[ch];
+  }
+}
+
+// A frozen pot goes live again once it reaches, or passes back through, its entry position.
+static void servicePickup() {
+  for (uint8_t ch = 0; ch < 3; ch++) {
+    if (!frozen[ch]) continue;
+    int16_t d = (int16_t)adcVal[ch] - (int16_t)potEntry[ch];
+    if (d <= PICKUP_WINDOW && d >= -PICKUP_WINDOW) frozen[ch] = false;
+    else if ((entrySign[ch] > 0) != (d > 0))       frozen[ch] = false;
+  }
+}
+
+// Pot travel splits into NUM_ALGOS zones, with hysteresis so a pot resting on a boundary does
+// not dither between two algorithms.
+static uint8_t zoneFor(uint8_t ch, uint16_t raw) {
+  uint8_t cur = gAlgo[ch];
+  uint8_t z = (uint8_t)(((uint32_t)raw * NUM_ALGOS) >> 10);
+  if (z == cur) return cur;
+  uint16_t bound = (uint16_t)((((uint32_t)(z > cur ? z : cur)) << 10) / NUM_ALGOS);
+  if (z > cur) return (raw >= bound + ZONE_HYST) ? z : cur;
+  return (raw + ZONE_HYST <= bound) ? z : cur;
+}
+
+static void beginEdit() {
+  editing = true;
+  lastTouched = -1;
+  if (gLorenz) {
+    // Nothing to select, and the entry positions belong to the rates LORENZ took over from,
+    // so leave them alone.  The long hold is the only thing this edit can do.
+    armed[0] = armed[1] = armed[2] = false;
+  } else {
+    freezePots();
+  }
+}
+
+static void endEdit() {
+  editing = false;
+  if (!gLorenz) releasePots();
+}
+
+static void serviceEdit() {
+  for (uint8_t ch = 0; ch < 3; ch++) {
+    int16_t d = (int16_t)adcVal[ch] - (int16_t)potEntry[ch];
+    if (!armed[ch]) {
+      if (d < ARM_DELTA && d > -ARM_DELTA) continue;
+      armed[ch] = true;
+      lastTouched = (int8_t)ch;
+    }
+
+    int16_t moved = (int16_t)adcVal[ch] - (int16_t)potSeen[ch];
+    if (moved > MOVE_DELTA || moved < -MOVE_DELTA) {
+      potSeen[ch] = adcVal[ch];
+      lastTouched = (int8_t)ch;
+    }
+
+    uint8_t z = zoneFor(ch, adcVal[ch]);
+    if (z != gAlgo[ch]) {
+      gAlgo[ch] = z;
+      markDirty();
     }
   }
 }
+
+static inline bool anyArmed() { return armed[0] || armed[1] || armed[2]; }
 
 // ---------------------------------------------------------------- LED
 static inline void ledSet(uint8_t v) {
@@ -295,6 +455,11 @@ static inline void ledSet(uint8_t v) {
     TCCR2A |= (1 << COM2B1);
     OCR2B = v;
   }
+}
+
+static void ledBlink(uint8_t times) {
+  blinkPhases = (uint8_t)(times * 2);     // on, off, on, off ...
+  blinkMs = millis();
 }
 
 // Triangle fade, one full up/down sweep every (1 << periodShift) ms.  The ramp is squared
@@ -309,56 +474,107 @@ static inline uint8_t triangleBrightness(uint16_t ms, uint8_t periodShift) {
 }
 
 static inline void serviceLED() {
-  uint16_t ms = (uint16_t)millis();
-  switch (gType) {
-    case T_DRIFT:      ledSet(0); break;
+  uint32_t nowMs = millis();
+
+  if (blinkPhases) {                                  // LORENZ confirmation overrides everything
+    if ((uint32_t)(nowMs - blinkMs) >= BLINK_MS) { blinkMs += BLINK_MS; blinkPhases--; }
+    if (blinkPhases) { ledSet((blinkPhases & 1) ? 0 : 255); return; }
+  }
+
+  if (!editing) { ledSet(ledLevel); return; }         // channel 1's output, LORENZ x included
+
+  uint16_t ms = (uint16_t)nowMs;
+  if (lastTouched < 0) {                              // in edit mode, no pot moved yet
+    ledSet((ms & 256) ? EDIT_IDLE_LED : 0);           // ~2 Hz dim blink
+    return;
+  }
+  switch (gAlgo[lastTouched]) {                       // nothing here is ever fully dark, so a
+    case T_DRIFT:      ledSet(EDIT_IDLE_LED); break;  // dim LED never reads as a dead one
     case T_WANDER:     ledSet(triangleBrightness(ms, 10)); break;    // ~1 Hz
     case T_TURBULENCE: ledSet(triangleBrightness(ms, 8)); break;     // ~4 Hz
-    case T_LORENZ:     ledSet(24); break;                            // steady dim
-    default:           ledSet(255); break;                           // steady on
+    default:           ledSet(255); break;                           // T_HOLD, steady on
+  }
+}
+
+// ---------------------------------------------------------------- button
+static void serviceButton() {
+  uint32_t now = millis();
+  uint8_t  r = digitalRead(PIN_BUTTON);
+
+  if (r != btnLastRead) { btnLastRead = r; btnChangedMs = now; }
+  else if (r != btnStable && (now - btnChangedMs) >= DEBOUNCE_MS) {
+    btnStable = r;
+    if (r == LOW) { btnDownMs = now; longFired = false; }   // a short tap does nothing
+    else if (editing) endEdit();
+  }
+
+  if (btnStable != LOW) return;
+
+  // longFired also marks the press spent, so the edit cannot restart after the gesture fires
+  if (!editing && !longFired && (now - btnDownMs) >= HOLD_MS) beginEdit();
+
+  // A long hold with every pot left alone is the whole module gesture.  In LORENZ no pot can
+  // arm, because serviceEdit does not run there, so a stray nudge can never block the way out.
+  if (editing && !longFired && (now - btnDownMs) >= LORENZ_HOLD_MS && !anyArmed()) {
+    longFired = true;
+    if (gLorenz) {
+      // Leaving.  End the edit here and now: potEntry still points at where the pots were before
+      // LORENZ, and letting serviceEdit loose on that stale reference would read the rho and beta
+      // positions as algorithm choices.
+      gLorenz = false;
+      releasePots();
+      editing = false;
+    } else {
+      gLorenz = true;          // entering; beginEdit already froze the pots, and endEdit will
+    }                          // leave them that way, holding the rates for the trip back
+    ledBlink(gLorenz ? 2 : 1);
+    markDirty();
   }
 }
 
 // ---------------------------------------------------------------- generators
-static void tickDriftOrHold(bool easeFull) {
-  for (uint8_t c = 0; c < 3; c++) {
-    writeOut(c, segStep(c, 0, incFromIndex(rateIndex(c)), easeFull));
-  }
+static inline void tickSegment(uint8_t ch, bool easeFull) {
+  writeOut(ch, segStep(ch, 0, incFromIndex(rateIndex(ch)), easeFull));
 }
 
-static void tickWander() {
-  for (uint8_t c = 0; c < 3; c++) {
-    uint32_t inc = incFromIndex(rateIndex(c));
-    int32_t  amp = (int32_t)(inc >> 9);            // kick size tracks the rate
-    int8_t   r   = (int8_t)(rnd16() >> 8);
-    wVel[c] += (r * amp) >> 7;                     // random impulse, +/- amp
-    wVel[c] -= (wVel[c] >> 5);                     // inertia / damping
-    wPos[c] += wVel[c];
-    if (wPos[c] < 0) {                             // reflect off the rails
-      wPos[c] = -wPos[c];
-      wVel[c] = -wVel[c];
-    } else if (wPos[c] > WPOS_MAX) {
-      wPos[c] = 2L * WPOS_MAX - wPos[c];
-      wVel[c] = -wVel[c];
-    }
-    if (wPos[c] < 0) wPos[c] = 0;
-    else if (wPos[c] > WPOS_MAX) wPos[c] = WPOS_MAX;
-    writeOut(c, (uint16_t)(wPos[c] >> 8));
+static void tickWander(uint8_t ch) {
+  uint32_t inc = incFromIndex(rateIndex(ch));
+  int32_t  amp = (int32_t)(inc >> 9);            // kick size tracks the rate
+  int8_t   r   = (int8_t)(rnd16() >> 8);
+  wVel[ch] += (r * amp) >> 7;                    // random impulse, +/- amp
+  wVel[ch] -= (wVel[ch] >> 5);                   // inertia / damping
+  wPos[ch] += wVel[ch];
+  if (wPos[ch] < 0) {                            // reflect off the rails
+    wPos[ch] = -wPos[ch];
+    wVel[ch] = -wVel[ch];
+  } else if (wPos[ch] > WPOS_MAX) {
+    wPos[ch] = 2L * WPOS_MAX - wPos[ch];
+    wVel[ch] = -wVel[ch];
   }
+  if (wPos[ch] < 0) wPos[ch] = 0;
+  else if (wPos[ch] > WPOS_MAX) wPos[ch] = WPOS_MAX;
+  writeOut(ch, (uint16_t)(wPos[ch] >> 8));
 }
 
-static void tickTurbulence() {
-  for (uint8_t c = 0; c < 3; c++) {
-    uint32_t inc = incFromIndex(rateIndex(c));
-    uint32_t q   = inc >> 2;
-    uint16_t v0 = segStep(c, 0, inc, true);        // 1x
-    uint16_t v1 = segStep(c, 1, q * 11, true);     // 2.75x
-    uint16_t v2 = segStep(c, 2, q * 29, true);     // 7.25x
-    int32_t acc = 4L * ((int32_t)v0 - 32768) + 2L * ((int32_t)v1 - 32768) + ((int32_t)v2 - 32768);
-    int32_t val = 32768L + ((acc * 1609L) >> 13);  // x11/56: /7 to normalise, x11/8 for range
-    if (val < 0) val = 0;
-    else if (val > 65535L) val = 65535L;
-    writeOut(c, (uint16_t)val);
+static void tickTurbulence(uint8_t ch) {
+  uint32_t inc = incFromIndex(rateIndex(ch));
+  uint32_t q   = inc >> 2;
+  uint16_t v0 = segStep(ch, 0, inc, true);        // 1x
+  uint16_t v1 = segStep(ch, 1, q * 11, true);     // 2.75x
+  uint16_t v2 = segStep(ch, 2, q * 29, true);     // 7.25x
+  int32_t acc = 4L * ((int32_t)v0 - 32768) + 2L * ((int32_t)v1 - 32768) + ((int32_t)v2 - 32768);
+  int32_t val = 32768L + ((acc * 1609L) >> 13);   // x11/56: /7 to normalise, x11/8 for range
+  if (val < 0) val = 0;
+  else if (val > 65535L) val = 65535L;
+  writeOut(ch, (uint16_t)val);
+}
+
+static void tickChannel(uint8_t ch) {
+  switch (gAlgo[ch]) {
+    case T_DRIFT:      tickSegment(ch, true);  break;
+    case T_WANDER:     tickWander(ch);         break;
+    case T_TURBULENCE: tickTurbulence(ch);     break;
+    default:           tickSegment(ch, false); break;   // T_HOLD
   }
 }
 
@@ -380,6 +596,8 @@ static inline uint16_t lorNorm(float v) {
   return (uint16_t)(v * 65535.0f);
 }
 
+// LORENZ reads the pots live: here they are the attractor's own controls, not the rates that
+// potVal is holding on to for when the module comes back out of this mode.
 static void tickLorenz() {
   if (lorSub == 1 && ++lorParamDiv >= 16) {   // ~32 ms, on a tick with no integration to do
     lorParamDiv = 0;
@@ -389,7 +607,7 @@ static void tickLorenz() {
     // Lorenz time step from POT1 + rate CV.  The constant folds in a 0.15 factor that maps
     // the pot's 0.01..20 Hz onto 0.0015..3 Hz, which keeps the whole sweep inside the region
     // where forward Euler on this system stays stable (dt tops out at 0.0042 after the split).
-    float dt = (float)incFromIndex(rateIndex(0)) * 1.956e-10f;
+    float dt = (float)incFromIndex(rateIndexFrom(adcVal[0])) * 1.956e-10f;
     uint8_t sub = 1;
     if (dt > 0.0021f) { sub = 2; dt *= 0.5f; }
 
@@ -421,18 +639,26 @@ static void tickLorenz() {
 void loop() {
   serviceADC();
   serviceButton();
+  if (!gLorenz) {                 // in LORENZ the pots belong to the attractor, so there is
+    if (editing) serviceEdit();   // nothing to arm and nothing to catch
+    else         servicePickup();
+  }
+  servicePots();
   serviceLED();
+
+  if (eeDirty && (millis() - eeDirtyMs) > EE_SAVE_DELAY_MS) {
+    eeDirty = false;
+    EEPROM.update(EE_ADDR_ALGO1,  gAlgo[0]);
+    EEPROM.update(EE_ADDR_ALGO2,  gAlgo[1]);
+    EEPROM.update(EE_ADDR_ALGO3,  gAlgo[2]);
+    EEPROM.update(EE_ADDR_LORENZ, gLorenz ? 1 : 0);
+  }
 
   uint32_t now = micros();
   if ((uint32_t)(now - lastTickUs) < TICK_US) return;
   lastTickUs += TICK_US;
   if ((uint32_t)(now - lastTickUs) > TICK_US * 4) lastTickUs = now;   // resync if we fell behind
 
-  switch (gType) {
-    case T_DRIFT:      tickDriftOrHold(true);  break;
-    case T_WANDER:     tickWander();           break;
-    case T_TURBULENCE: tickTurbulence();       break;
-    case T_LORENZ:     tickLorenz();           break;
-    default:           tickDriftOrHold(false); break;   // T_HOLD
-  }
+  if (gLorenz) tickLorenz();
+  else for (uint8_t c = 0; c < 3; c++) tickChannel(c);
 }

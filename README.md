@@ -5,7 +5,7 @@ Nano based general-purpose Eurorack CV module.
 
 | Firmware | What it is |
 |---|---|
-| [`smooth_random/`](smooth_random) | Three independent smooth random voltages, five algorithms, one rate pot per channel |
+| [`smooth_random/`](smooth_random) | Three smooth random voltages, one algorithm and one rate pot per channel, plus a Lorenz attractor across all three |
 | [`clepz/`](clepz) | Step CV / random / smooth-noise LFO generator, inspired by the interface of Noise Engineering's Clep Diaz |
 | [`triple_lfo/`](triple_lfo) | Three independent LFOs, six waveforms, one per channel. Extends HAGIWO's own 3ch LFO |
 
@@ -52,7 +52,7 @@ Current usage on the ATmega328P (30720 B flash, 2048 B RAM):
 
 | Firmware | Flash | RAM |
 |---|---|---|
-| `smooth_random` | 7058 B (22 %) | 179 B (8 %) |
+| `smooth_random` | 8660 B (28 %) | 228 B (11 %) |
 | `clepz` | 5322 B (17 %) | 136 B (6 %) |
 | `triple_lfo` | 3682 B (11 %) | 104 B (5 %) |
 
