@@ -133,7 +133,7 @@ two things on one indicator.
   a full-scale input at unity gain lands on full-scale output, and the filter neither stalls short
   of its target nor underflows on the way to zero.
 - No floating point, no interrupts, no `analogRead` after `setup()`, Timer0 and `millis()` left
-  alone. **3324 bytes of flash (10 %) and 71 bytes of RAM (3 %)** — the smallest of the four.
+  alone. **3324 bytes of flash (10 %) and 71 bytes of RAM (3 %)** — the least RAM of any of them.
 - The worst-case `loop()` time against the 50 µs fast budget **has not been measured on hardware**.
   The control tick is one 16×16 multiply, a table interpolation, three `OCR` writes and the UI, so
   it should sit well inside the budget, but that is reasoning rather than a measurement.
