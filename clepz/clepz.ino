@@ -21,7 +21,8 @@
   POT3  A2   slew / glide
   F1    A3   clock in  (rising edge, the only fast DC-coupled input on the MOD1)
   F2    A4   reset in  (read as analog with hysteresis: F2 has a 1uF cap to ground)
-  F3    A5   CV in: adds to the step count (adds to amplitude in LFO mode)
+  F3    A5   CV in: takes over the step count from POT1 (the amplitude in LFO mode).  The MOD1
+             has no switched jack, so a rise above ~0.1 V is what marks it as patched
   F4    D11  unipolar CV out, 0..5V
   BUTTON D4  short press = mode, long press = direction, very long press = reset / re-roll.
              Held while POT2 moves it is a modifier instead, and no gesture fires on release
@@ -52,6 +53,9 @@
 #define EE_SAVE_DELAY_MS 2000UL
 #define HINT_MS          800UL
 #define DIV_POT_HYST     24      // POT2 counts of travel that count as a deliberate turn
+#define CV_PRESENT_LO    20      // ~0.1 V on F3: below this the jack reads as unpatched
+#define CV_IDLE_MS       3000UL  // F3 sat that low for this long hands POT1 back
+#define CV_POT_TAKEOVER  8       // POT1 counts of travel that reclaim it while F3 is quiet
 #define BOC_FLASH_MS     20UL
 
 #define EE_ADDR_MODE 0
@@ -98,6 +102,11 @@ static bool     gDivOdd = false;     // false = powers of two, true = odd divisi
 static uint16_t divPotLast = 0;
 static uint8_t  clkPrev = LOW;
 static uint32_t clkEdgeGuardMs = 0;
+
+// F3 takeover
+static bool     cvActive = false;    // F3 is driving the count / amplitude instead of POT1
+static uint32_t cvQuietMs = 0;
+static uint16_t cvPotLast = 0;
 
 // sequence
 static uint8_t  stepVals[MAX_STEPS];
@@ -265,10 +274,11 @@ static void applyStepValue() {
   }
 }
 
-// POT1 + F3 CV set the LFO amplitude, which scales the target away from 0 V
+// POT1, or F3 when it has taken over, sets the LFO amplitude: it scales the target away from 0 V
 static void newLfoTarget() {
   lfoFrom = slewOut;
-  uint16_t amp = (uint16_t)min(1023L, (long)adcVal[0] + (long)adcVal[5]);
+  uint16_t amp = cvActive ? adcVal[5] : adcVal[0];
+  if (amp > 1023) amp = 1023;
   lfoTo = (uint16_t)(((uint32_t)rnd8() * 257UL * amp) / 1023UL);
 }
 
@@ -448,12 +458,31 @@ static void serviceLED() {
 }
 
 // ---------------------------------------------------------------- controls
+// F3 replaces POT1 rather than adding to it, but the MOD1 has no switched jack, so "patched" has
+// to be inferred.  A rise past ~0.1 V latches the jack in, and it then keeps control even when the
+// CV falls back to 0 V, so counts of 0 and 1 stay reachable from the jack.  Moving POT1 while the
+// CV is quiet, or three seconds sat at 0 V, hands control back to the pot.
+static void serviceCvTakeover() {
+  uint32_t now = millis();
+
+  if (adcVal[5] > CV_PRESENT_LO) {
+    cvActive  = true;
+    cvQuietMs = now;
+    cvPotLast = adcVal[0];          // track POT1 while the CV drives, so only a later turn counts
+    return;
+  }
+  if (!cvActive) return;
+
+  int16_t d = (int16_t)adcVal[0] - (int16_t)cvPotLast;
+  if (d > CV_POT_TAKEOVER || d < -CV_POT_TAKEOVER) cvActive = false;
+  else if ((now - cvQuietMs) >= CV_IDLE_MS)        cvActive = false;
+}
+
 static void serviceCount() {
   if (gMode == M_LFO) return;                       // POT1 is amplitude in LFO mode
 
-  long fromPot = ((long)adcVal[0] * (MAX_STEPS + 1)) >> 10;   // 0..MAX_STEPS
-  long fromCv  = ((long)adcVal[5] * (MAX_STEPS - 1L) + 512L) >> 10;  // CV adds up to MAX_STEPS-1
-  long n = fromPot + fromCv;
+  uint16_t src = cvActive ? adcVal[5] : adcVal[0];
+  long n = ((long)src * (MAX_STEPS + 1)) >> 10;     // 0..MAX_STEPS, mute at the bottom either way
   if (n > MAX_STEPS) n = MAX_STEPS;
 
   if ((uint8_t)n == gCount) return;
@@ -515,6 +544,7 @@ void loop() {
   serviceDivider();
   serviceReset();
   serviceButton();
+  serviceCvTakeover();
   serviceCount();
   serviceSlew();
   serviceLED();

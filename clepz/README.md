@@ -18,7 +18,7 @@ three pots and four jacks. The compression:
 | LED counter | one LED: it follows the output, and shows the count hint described below |
 | `Clk` | **F1** |
 | `Rst` | **F2** |
-| `CV` | **F3** |
+| `CV` | **F3** — but it *replaces* POT1 here rather than offsetting it |
 | `Uni` | **F4** |
 | `BOC` | dropped — no jack left; the LED flashes at the beginning of each cycle instead |
 | `Bi` | dropped — the MOD1 has no negative rail, so a bipolar output is not possible |
@@ -31,7 +31,7 @@ case: a clock when you have not patched one, and slew.
 ```
 POT1  A0   step count  (LFO: amplitude)     F1  A3   clock in
 POT2  A1   tempo, or clock divider          F2  A4   reset in
-POT3  A2   slew / glide                     F3  A5   CV in -> step count
+POT3  A2   slew / glide                     F3  A5   CV in -> replaces POT1
 BUTTON D4  short = mode, long = direction   F4  D11  CV out, 0-5 V
            very long = reset / re-roll
            held + POT2 = odd divisions
@@ -46,6 +46,8 @@ the amplitude instead, scaling the output up from 0 V.
 
 Sixteen positions rather than the original's thirty-two: a single-turn pot cannot reliably land on
 one count in thirty-two, and the counts that matter musically are almost all under sixteen.
+
+**A CV patched to F3 takes this pot's job over entirely** — see F3 below.
 
 ### POT2 — tempo *or* divider
 
@@ -105,8 +107,19 @@ Mode and direction are written to EEPROM two seconds after you stop changing the
   read as an *analog* value with hysteresis (high above ~2.0 V, low below ~1.0 V) rather than as a
   digital pin. **Triggers shorter than about 1 ms may not clear the threshold** — use a gate or a
   normal-length trigger. The very-long button press does the same thing by hand.
-- **F3 — CV in.** 0–5 V adds up to 15 steps to whatever POT1 is set to (adds amplitude in LFO mode).
-  The same 1 µF cap that hurts F2 is exactly right here: it is already a CV smoother.
+- **F3 — CV in.** 0–5 V **replaces** POT1: it sets the count outright, across the same 0–16 range,
+  with 0 V muting exactly as a fully counter-clockwise POT1 does. In LFO mode it sets the amplitude
+  the same way. The same 1 µF cap that hurts F2 is exactly right here: it is already a CV smoother.
+
+  The MOD1 has no switched jack, so there is no way to *know* whether anything is patched, and the
+  firmware infers it. **A rise past about 0.1 V latches F3 in.** Once latched it keeps control even
+  when the CV returns to 0 V, which is what makes counts of 0 and 1 reachable from the jack. Control
+  goes back to POT1 when you **turn POT1** while the CV is sitting low, or after the CV has stayed
+  below 0.1 V for **three seconds**.
+
+  The one consequence worth knowing: a very slow LFO patched here that lingers near 0 V for more
+  than three seconds will hand the count back to POT1 mid-swing. Raise its offset slightly if that
+  bites.
 - **F4 — CV out.** 0–5 V unipolar, 1k output impedance. Not quantized.
 
 ## LED
