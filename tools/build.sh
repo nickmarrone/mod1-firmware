@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compile both MOD1 firmwares for the Arduino Nano and report flash / RAM usage.
+# Compile the MOD1 firmwares for the Arduino Nano and report flash / RAM usage.
 #
 #   tools/build.sh              compile everything
 #   tools/build.sh clepz        compile one sketch
@@ -18,7 +18,7 @@ if ! command -v "$CLI" >/dev/null 2>&1; then
 fi
 
 SKETCHES=("$@")
-if [ ${#SKETCHES[@]} -eq 0 ]; then SKETCHES=(smooth_random clepz triple_lfo); fi
+if [ ${#SKETCHES[@]} -eq 0 ]; then SKETCHES=(smooth_random clepz triple_lfo envelope_follower); fi
 
 status=0
 for s in "${SKETCHES[@]}"; do

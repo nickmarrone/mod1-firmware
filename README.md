@@ -1,6 +1,6 @@
 # MOD1 firmwares
 
-Three firmwares for [HAGIWO's MOD1](https://note.com/solder_state/n/nc05d8e8fd311), the Arduino
+Four firmwares for [HAGIWO's MOD1](https://note.com/solder_state/n/nc05d8e8fd311), the Arduino
 Nano based general-purpose Eurorack CV module.
 
 | Firmware | What it is |
@@ -8,8 +8,9 @@ Nano based general-purpose Eurorack CV module.
 | [`smooth_random/`](smooth_random) | Three smooth random voltages, one algorithm and one rate pot per channel, plus a Lorenz attractor across all three |
 | [`clepz/`](clepz) | Step CV / random / smooth-noise LFO generator, inspired by the interface of Noise Engineering's Clep Diaz |
 | [`triple_lfo/`](triple_lfo) | Three independent LFOs, six waveforms, one per channel. Extends HAGIWO's own 3ch LFO |
+| [`envelope_follower/`](envelope_follower) | Envelope follower and gate extractor: takes a signal on F1 and gives back its envelope, a gate, and the envelope inverted |
 
-All three target `arduino:avr:nano` and are single-file sketches, so they work with the Arduino IDE
+All four target `arduino:avr:nano` and are single-file sketches, so they work with the Arduino IDE
 unchanged.
 
 ## The hardware
@@ -29,23 +30,24 @@ Read off the MOD1 schematic and HAGIWO's build article.
 | **F3** | `A5` **and** `D10` (`OC1B`) | same |
 | **F4** | `D11` (`OC2A`) | **output only** |
 
-Three things about this hardware shape both firmwares:
+Three things about this hardware shape all four firmwares:
 
 - **Outputs are 0–5 V only.** There is no negative rail, so there is no bipolar output to be had.
 - **F2/F3/F4 each have a 1 µF cap to ground behind a 1k series resistor** — a ~159 Hz
   reconstruction filter. Great for a PWM CV output (25 mV of ripple at 62.5 kHz, 1k output
   impedance), but it also means those jacks *as inputs* see edges smeared by 200–600 µs. Read
   gates on F2/F3 as analog values with threshold hysteresis, never with `digitalRead`.
-- **F1 is the only fast input,** so in both firmwares it gets whatever needs to be sampled sharply.
+- **F1 is the only fast input,** so it gets whatever needs to be sampled sharply - the clock in `clepz`, the signal in
+  `envelope_follower`.
 
-Both sketches drive their outputs by writing `OCR` registers directly with the timers in fast PWM
+Every sketch drives its outputs by writing `OCR` registers directly with the timers in fast PWM
 at 62.5 kHz, the same approach as HAGIWO's own firmwares.
 
 ## Building
 
 ```bash
 arduino-cli core update-index && arduino-cli core install arduino:avr
-tools/build.sh                     # compiles all three, prints flash / RAM
+tools/build.sh                     # compiles all four, prints flash / RAM
 ```
 
 Current usage on the ATmega328P (30720 B flash, 2048 B RAM):
@@ -55,6 +57,7 @@ Current usage on the ATmega328P (30720 B flash, 2048 B RAM):
 | `smooth_random` | 8660 B (28 %) | 228 B (11 %) |
 | `clepz` | 5322 B (17 %) | 136 B (6 %) |
 | `triple_lfo` | 3682 B (11 %) | 104 B (5 %) |
+| `envelope_follower` | 3324 B (10 %) | 71 B (3 %) |
 
 ## Uploading
 
