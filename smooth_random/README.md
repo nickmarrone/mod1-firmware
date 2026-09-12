@@ -29,8 +29,8 @@ cycle.
 | # | Name | LED | Character |
 |---|---|---|---|
 | 0 | **DRIFT** | off | Picks a random destination, glides there on a smooth S-curve, arrives, rests, picks another. Uses the full 0–5 V range and has a clear sense of *arriving somewhere*. |
-| 1 | **WANDER** | slow blink (~1 Hz) | Brownian motion with inertia. No destination and no rest — it just meanders, and it stays near where it already was. Bounces off the rails instead of sticking to them. |
-| 2 | **TURBULENCE** | fast blink (~4 Hz) | Three octaves of DRIFT summed (1×, 2.75×, 7.25× the pot rate at 1, ½, ¼ amplitude). Slow drift with fine detail riding on top — the busiest of the five. |
+| 1 | **WANDER** | slow triangle fade (~1 Hz) | Brownian motion with inertia. No destination and no rest — it just meanders, and it stays near where it already was. Bounces off the rails instead of sticking to them. |
+| 2 | **TURBULENCE** | fast triangle fade (~4 Hz) | Three octaves of DRIFT summed (1×, 2.75×, 7.25× the pot rate at 1, ½, ¼ amplitude). Slow drift with fine detail riding on top — the busiest of the five. |
 | 3 | **LORENZ** | steady dim | A Lorenz attractor. See the note below — this one uses the pots differently. |
 | 4 | **HOLD** | steady on | Sample-and-hold that glides instead of stepping: it crosses to the new value over the first quarter of the period, then holds. Stepped feel, no clicks. |
 

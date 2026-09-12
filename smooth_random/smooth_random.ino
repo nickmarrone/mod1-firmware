@@ -19,8 +19,8 @@
 
   Type                LED
   0 DRIFT             off
-  1 WANDER            slow blink (1 Hz)
-  2 TURBULENCE        fast blink (5 Hz)
+  1 WANDER            slow triangle fade (1 Hz)
+  2 TURBULENCE        fast triangle fade (4 Hz)
   3 LORENZ            steady dim
   4 HOLD              steady on
 
@@ -297,12 +297,23 @@ static inline void ledSet(uint8_t v) {
   }
 }
 
+// Triangle fade, one full up/down sweep every (1 << periodShift) ms.  The ramp is squared
+// on the way out: the eye is roughly square law, so a linear duty ramp would shoot up and
+// then sit near full for most of the sweep instead of reading as a steady fade.
+static inline uint8_t triangleBrightness(uint16_t ms, uint8_t periodShift) {
+  uint16_t half = (uint16_t)(1u << (periodShift - 1));
+  uint16_t t    = (uint16_t)(ms & ((1u << periodShift) - 1));
+  uint16_t up   = (t < half) ? t : (uint16_t)(2 * half - 1 - t);     // 0 .. half-1 and back
+  uint8_t  lin  = (uint8_t)(((uint32_t)up << 8) >> (periodShift - 1));
+  return (uint8_t)(((uint16_t)lin * lin) >> 8);
+}
+
 static inline void serviceLED() {
   uint16_t ms = (uint16_t)millis();
   switch (gType) {
     case T_DRIFT:      ledSet(0); break;
-    case T_WANDER:     ledSet((ms & 512) ? 255 : 0); break;          // ~1 Hz
-    case T_TURBULENCE: ledSet((ms & 128) ? 255 : 0); break;          // ~4 Hz
+    case T_WANDER:     ledSet(triangleBrightness(ms, 10)); break;    // ~1 Hz
+    case T_TURBULENCE: ledSet(triangleBrightness(ms, 8)); break;     // ~4 Hz
     case T_LORENZ:     ledSet(24); break;                            // steady dim
     default:           ledSet(255); break;                           // steady on
   }
