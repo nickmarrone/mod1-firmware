@@ -53,7 +53,7 @@ Current usage on the ATmega328P (30720 B flash, 2048 B RAM):
 | Firmware | Flash | RAM |
 |---|---|---|
 | `smooth_random` | 7058 B (22 %) | 179 B (8 %) |
-| `clepz` | 4886 B (15 %) | 140 B (6 %) |
+| `clepz` | 5242 B (17 %) | 129 B (6 %) |
 | `triple_lfo` | 3682 B (11 %) | 104 B (5 %) |
 
 ## Uploading

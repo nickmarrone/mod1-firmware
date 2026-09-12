@@ -15,13 +15,16 @@
 
   --Pin assign---
   POT1  A0   step count (Step/Random) or amplitude (LFO).  Fully CCW = muted
-  POT2  A1   internal tempo when nothing is patched to F1, clock divider when it is
+  POT2  A1   internal tempo when nothing is patched to F1, clock divider when it is.
+             Turned on its own it picks /1 /2 /4 /8 /16 /32; turned with the button held down
+             it picks the odd divisions /1 /3 /5 /7 /11 /17 instead
   POT3  A2   slew / glide
   F1    A3   clock in  (rising edge, the only fast DC-coupled input on the MOD1)
   F2    A4   reset in  (read as analog with hysteresis: F2 has a 1uF cap to ground)
   F3    A5   CV in: adds to the step count (adds to amplitude in LFO mode)
   F4    D11  unipolar CV out, 0..5V
-  BUTTON D4  short press = mode, long press = direction, very long press = reset / re-roll
+  BUTTON D4  short press = mode, long press = direction, very long press = reset / re-roll.
+             Held while POT2 moves it is a modifier instead, and no gesture fires on release
   LED   D3   output level, beginning-of-cycle flash, and mode/direction confirmations
 
   D9 and D10 are deliberately left as inputs: on the MOD1 they sit on the same nets as A4/A5,
@@ -48,20 +51,24 @@
 #define DEBOUNCE_MS      30UL
 #define EE_SAVE_DELAY_MS 2000UL
 #define HINT_MS          800UL
+#define DIV_POT_HYST     24      // POT2 counts of travel that count as a deliberate turn
 #define BOC_FLASH_MS     20UL
 
 #define EE_ADDR_MODE 0
 #define EE_ADDR_DIR  1
 
-#define MAX_STEPS      32        // Up / Down; Up-Down ping-pongs these into a 62 step cycle
+#define MAX_STEPS      16        // Up / Down; Up-Down ping-pongs these into a 30 step cycle
 #define RESET_HI       410       // ~2.0 V on a 0..1023 ADC
 #define RESET_LO       205       // ~1.0 V
 
 enum { M_STEP = 0, M_RAND, M_LFO };
 enum { D_UP = 0, D_UPDN, D_DN };
 
-// Clock dividers selected by POT2 when an external clock is present
-static const uint8_t DIVIDERS[8] PROGMEM = { 1, 2, 3, 4, 6, 8, 12, 16 };
+// Clock dividers selected by POT2.  Two tables share the pot: the plain turn walks the powers of
+// two, the same turn with the button held walks the odd divisions.  Six entries each.
+#define DIV_SLOTS 6
+static const uint8_t DIV_POW2[DIV_SLOTS] PROGMEM = { 1, 2, 4, 8, 16, 32 };
+static const uint8_t DIV_ODD [DIV_SLOTS] PROGMEM = { 1, 3, 5, 7, 11, 17 };
 
 // Internal tempo, ms per step: 2000 ms (30 BPM) down to 62 ms (~960 BPM), exponential
 static const uint16_t TEMPO_TAB[17] PROGMEM = {
@@ -86,6 +93,9 @@ static uint32_t lastAdvanceMs = 0;
 static uint16_t extPeriodMs = 500;
 static uint16_t effPeriodMs = 500;   // period between step advances, after division
 static uint8_t  divCounter = 0;
+static uint8_t  gDivIdx = 0;         // slot in whichever divider table is live
+static bool     gDivOdd = false;     // false = powers of two, true = odd divisions
+static uint16_t divPotLast = 0;
 static uint8_t  clkPrev = LOW;
 static uint32_t clkEdgeGuardMs = 0;
 
@@ -109,6 +119,7 @@ static uint16_t slewKPeriod = 0;
 static uint32_t btnChangedMs = 0, btnDownMs = 0;
 static uint8_t  btnLastRead = HIGH, btnStable = HIGH;
 static bool     vlongFired = false;
+static bool     btnDivUsed = false;  // this hold was spent on POT2, so release does nothing
 
 // LED
 static uint8_t  patLeft = 0, patBright = 0;
@@ -142,6 +153,15 @@ static inline void ledSet(uint8_t v) {
     TCCR2A |= (1 << COM2B1);
     OCR2B = v;
   }
+}
+
+static inline uint8_t currentDivider() {
+  return pgm_read_byte(gDivOdd ? &DIV_ODD[gDivIdx] : &DIV_POW2[gDivIdx]);
+}
+
+static inline uint8_t divSlotForPot(uint16_t pot) {
+  uint8_t idx = (uint8_t)(((uint32_t)pot * DIV_SLOTS) >> 10);
+  return (idx >= DIV_SLOTS) ? (uint8_t)(DIV_SLOTS - 1) : idx;
 }
 
 static void startPattern(uint8_t pulses, uint8_t bright, uint16_t onMs, uint16_t offMs) {
@@ -192,6 +212,11 @@ void setup() {
   gDir  = (d <= D_DN)  ? d : (uint8_t)D_UP;
 
   for (uint8_t i = 0; i < MAX_STEPS; i++) stepVals[i] = rnd8();
+
+  // Seed POT2 so the divider starts where the pot already is rather than at /1
+  adcVal[1]  = (uint16_t)analogRead(A1);
+  divPotLast = adcVal[1];
+  gDivIdx    = divSlotForPot(adcVal[1]);
 
   DIDR0 = (1 << ADC0D) | (1 << ADC1D) | (1 << ADC2D) | (1 << ADC4D) | (1 << ADC5D);
   ADMUX  = (1 << REFS0) | 0;
@@ -299,7 +324,7 @@ static void serviceClock() {
     lastEdgeMs = now;
     extClock = true;
 
-    uint8_t divN = pgm_read_byte(&DIVIDERS[adcVal[1] >> 7]);
+    uint8_t divN = currentDivider();
     effPeriodMs = (uint16_t)min(60000UL, (uint32_t)extPeriodMs * divN);
     if (++divCounter >= divN) {
       divCounter = 0;
@@ -323,6 +348,28 @@ static void serviceClock() {
     effPeriodMs = (uint16_t)(a - (((uint32_t)(a - b) * f) >> 6));
     if ((now - lastAdvanceMs) >= effPeriodMs) advanceStep();
   }
+}
+
+// ---------------------------------------------------------------- clock divider
+// The selection latches on pot movement so one pot can carry two tables: turn POT2 on its own for
+// /1 /2 /4 /8 /16 /32, turn it with the button held for /1 /3 /5 /7 /11 /17.  Holding the button
+// this way cancels the mode / direction gesture that a release would otherwise fire.
+static void serviceDivider() {
+  uint16_t pot = adcVal[1];
+  int16_t  d   = (int16_t)pot - (int16_t)divPotLast;
+  if (d > -DIV_POT_HYST && d < DIV_POT_HYST) return;
+  divPotLast = pot;
+
+  bool odd = (btnStable == LOW);
+  if (odd) btnDivUsed = true;
+
+  uint8_t idx = divSlotForPot(pot);
+  if (idx == gDivIdx && odd == gDivOdd) return;
+  gDivIdx = idx;
+  gDivOdd = odd;
+  divCounter = 0;
+  // bright = powers of two, dim = odd, matching the mode / direction convention
+  if (extClock || odd) startPattern((uint8_t)(idx + 1), odd ? 40 : 255, 60, 120);
 }
 
 // ---------------------------------------------------------------- reset input
@@ -349,7 +396,8 @@ static void serviceButton() {
     if (r == LOW) {                       // press
       btnDownMs = now;
       vlongFired = false;
-    } else if (!vlongFired) {             // release without having already fired
+      btnDivUsed = false;
+    } else if (!vlongFired && !btnDivUsed) {   // release without having already fired
       uint32_t held = now - btnDownMs;
       if (held < PRESS_SHORT_MS) {
         gMode = (uint8_t)((gMode + 1) % 3);
@@ -366,7 +414,7 @@ static void serviceButton() {
     }
   }
 
-  if (btnStable == LOW && !vlongFired && (now - btnDownMs) >= PRESS_VLONG_MS) {
+  if (btnStable == LOW && !vlongFired && !btnDivUsed && (now - btnDownMs) >= PRESS_VLONG_MS) {
     vlongFired = true;
     resetSequence(true);
     startPattern(1, 255, 250, 100);
@@ -404,7 +452,7 @@ static void serviceCount() {
   if (gMode == M_LFO) return;                       // POT1 is amplitude in LFO mode
 
   long fromPot = ((long)adcVal[0] * (MAX_STEPS + 1)) >> 10;   // 0..MAX_STEPS
-  long fromCv  = ((long)adcVal[5] * 31L + 512L) >> 10;        // CV adds up to 31 steps
+  long fromCv  = ((long)adcVal[5] * (MAX_STEPS - 1L) + 512L) >> 10;  // CV adds up to MAX_STEPS-1
   long n = fromPot + fromCv;
   if (n > MAX_STEPS) n = MAX_STEPS;
 
@@ -464,6 +512,7 @@ static void outputTick() {
 void loop() {
   serviceADC();
   serviceClock();
+  serviceDivider();
   serviceReset();
   serviceButton();
   serviceCount();

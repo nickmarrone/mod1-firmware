@@ -34,23 +34,40 @@ POT2  A1   tempo, or clock divider          F2  A4   reset in
 POT3  A2   slew / glide                     F3  A5   CV in -> step count
 BUTTON D4  short = mode, long = direction   F4  D11  CV out, 0-5 V
            very long = reset / re-roll
+           held + POT2 = odd divisions
 LED   D3   output level + cycle + status
 ```
 
 ### POT1 — count / amplitude
 
-In **Step** and **Random**, 0 to 32 steps. Fully counter-clockwise is 0 = **muted** (output held at
-0 V, LED off). In **Up/Down** the 32 steps ping-pong into a cycle of up to 62. In **LFO**, POT1 is
+In **Step** and **Random**, 0 to 16 steps. Fully counter-clockwise is 0 = **muted** (output held at
+0 V, LED off). In **Up/Down** the 16 steps ping-pong into a cycle of up to 30. In **LFO**, POT1 is
 the amplitude instead, scaling the output up from 0 V.
+
+Sixteen positions rather than the original's thirty-two: a single-turn pot cannot reliably land on
+one count in thirty-two, and the counts that matter musically are almost all under sixteen.
 
 ### POT2 — tempo *or* divider
 
 With **nothing patched to F1**, POT2 is the internal tempo: **30 to 960 BPM**, exponential. Three
 seconds after the last external clock edge the module falls back to it automatically.
 
-With a **clock patched to F1**, the same pot becomes a clock divider: **÷1, 2, 3, 4, 6, 8, 12, 16**
-across its travel. Note that the pot changes job the moment a clock arrives — set it after you
-patch.
+With a **clock patched to F1**, the same pot becomes a clock divider, and it carries two tables:
+
+| Turn POT2 | Divisions |
+|---|---|
+| on its own | ÷**1, 2, 4, 8, 16, 32** — six slots across the travel |
+| with the **button held down** | ÷**1, 3, 5, 7, 11, 17** |
+
+The choice **latches** when you turn the pot, so the odd divisions stay selected after you let the
+button go. Turning POT2 again on its own drops back to the powers of two. The LED confirms each
+change with *slot number* flashes: **bright** for the powers of two, **dim** for the odd ones.
+
+Holding the button to reach the odd table cancels the gesture that the release would otherwise
+fire, so dialling a division never changes the mode or the direction by accident. A hold where you
+do not touch POT2 still behaves as a normal long press.
+
+Note that the pot changes job the moment a clock arrives — set it after you patch.
 
 ### POT3 — slew
 
@@ -64,6 +81,7 @@ constant of one whole step at the top. In LFO mode it adds extra lag on top of t
 | short, under 400 ms | mode: Step → Random → LFO | 1 / 2 / 3 **bright** short flashes |
 | long, 0.4–1.5 s | direction: Up → Up/Down → Down | 1 / 2 / 3 **dim** long flashes |
 | very long, over 1.5 s | reset to the start of the cycle, and re-roll the random values | one long bright flash |
+| any length, while turning POT2 | clock divider from the odd table | 1–6 **dim** short flashes |
 
 Bright flashes mean mode, dim flashes mean direction — that is how one LED carries two switches.
 Mode and direction are written to EEPROM two seconds after you stop changing them.
@@ -87,7 +105,7 @@ Mode and direction are written to EEPROM two seconds after you stop changing the
   read as an *analog* value with hysteresis (high above ~2.0 V, low below ~1.0 V) rather than as a
   digital pin. **Triggers shorter than about 1 ms may not clear the threshold** — use a gate or a
   normal-length trigger. The very-long button press does the same thing by hand.
-- **F3 — CV in.** 0–5 V adds up to 31 steps to whatever POT1 is set to (adds amplitude in LFO mode).
+- **F3 — CV in.** 0–5 V adds up to 15 steps to whatever POT1 is set to (adds amplitude in LFO mode).
   The same 1 µF cap that hurts F2 is exactly right here: it is already a CV smoother.
 - **F4 — CV out.** 0–5 V unipolar, 1k output impedance. Not quantized.
 
