@@ -15,6 +15,11 @@ Nano based general-purpose Eurorack CV module.
 All six target `arduino:avr:nano` and are single-file sketches, so they work with the Arduino IDE
 unchanged.
 
+[**UI.md**](UI.md) is the catalogue of panel-interface elements the six share — the debouncer, the
+shift layers, pot arming and pickup, the LED vocabulary, the EEPROM save. Because the sketches are
+single-file there is no shared header, so those idioms are copy-pasted between them deliberately;
+the catalogue is where they are kept honest.
+
 ## The hardware
 
 Read off the MOD1 schematic and HAGIWO's build article.
@@ -61,7 +66,7 @@ Current usage on the ATmega328P (30720 B flash, 2048 B RAM):
 | `triple_lfo` | 3682 B (11 %) | 104 B (5 %) |
 | `envelope_follower` | 3324 B (10 %) | 71 B (3 %) |
 | `keyframe_morpher` | 3134 B (10 %) | 76 B (3 %) |
-| `krell` | 3722 B (12 %) | 68 B (3 %) |
+| `krell` | 5458 B (17 %) | 109 B (5 %) |
 
 ## Uploading
 
