@@ -18,7 +18,7 @@ if ! command -v "$CLI" >/dev/null 2>&1; then
 fi
 
 SKETCHES=("$@")
-if [ ${#SKETCHES[@]} -eq 0 ]; then SKETCHES=(smooth_random clepz triple_lfo envelope_follower keyframe_morpher); fi
+if [ ${#SKETCHES[@]} -eq 0 ]; then SKETCHES=(smooth_random clepz triple_lfo envelope_follower keyframe_morpher krell); fi
 
 status=0
 for s in "${SKETCHES[@]}"; do

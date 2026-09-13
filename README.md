@@ -1,6 +1,6 @@
 # MOD1 firmwares
 
-Five firmwares for [HAGIWO's MOD1](https://note.com/solder_state/n/nc05d8e8fd311), the Arduino
+Six firmwares for [HAGIWO's MOD1](https://note.com/solder_state/n/nc05d8e8fd311), the Arduino
 Nano based general-purpose Eurorack CV module.
 
 | Firmware | What it is |
@@ -10,8 +10,9 @@ Nano based general-purpose Eurorack CV module.
 | [`triple_lfo/`](triple_lfo) | Three independent LFOs, six waveforms, one per channel. Extends HAGIWO's own 3ch LFO |
 | [`envelope_follower/`](envelope_follower) | Envelope follower and gate extractor: takes a signal on F1 and gives back its envelope, a gate, and the envelope inverted |
 | [`keyframe_morpher/`](keyframe_morpher) | Four stored scenes and one knob that sweeps between them, dragging the three outputs along three different paths |
+| [`krell/`](krell) | A self-generating random envelope: it rolls its own rise, fall and rest times and runs on its own, giving an envelope, a trigger and a pitch |
 
-All five target `arduino:avr:nano` and are single-file sketches, so they work with the Arduino IDE
+All six target `arduino:avr:nano` and are single-file sketches, so they work with the Arduino IDE
 unchanged.
 
 ## The hardware
@@ -31,7 +32,7 @@ Read off the MOD1 schematic and HAGIWO's build article.
 | **F3** | `A5` **and** `D10` (`OC1B`) | same |
 | **F4** | `D11` (`OC2A`) | **output only** |
 
-Three things about this hardware shape all five firmwares:
+Three things about this hardware shape all six firmwares:
 
 - **Outputs are 0–5 V only.** There is no negative rail, so there is no bipolar output to be had.
 - **F2/F3/F4 each have a 1 µF cap to ground behind a 1k series resistor** — a ~159 Hz
@@ -48,7 +49,7 @@ at 62.5 kHz, the same approach as HAGIWO's own firmwares.
 
 ```bash
 arduino-cli core update-index && arduino-cli core install arduino:avr
-tools/build.sh                     # compiles all five, prints flash / RAM
+tools/build.sh                     # compiles all six, prints flash / RAM
 ```
 
 Current usage on the ATmega328P (30720 B flash, 2048 B RAM):
@@ -60,6 +61,7 @@ Current usage on the ATmega328P (30720 B flash, 2048 B RAM):
 | `triple_lfo` | 3682 B (11 %) | 104 B (5 %) |
 | `envelope_follower` | 3324 B (10 %) | 71 B (3 %) |
 | `keyframe_morpher` | 3134 B (10 %) | 76 B (3 %) |
+| `krell` | 3722 B (12 %) | 68 B (3 %) |
 
 ## Uploading
 
@@ -77,4 +79,6 @@ MOD1 hardware and the original firmware family by [HAGIWO](https://note.com/sold
 to the *interface* of Noise Engineering's Clep Diaz — it is not affiliated with, endorsed by, or
 derived from any Noise Engineering code. `keyframe_morpher` is an independent homage to the
 *interface* of Mutable Instruments Frames on the same terms — not affiliated with, endorsed by, or
-derived from any Mutable Instruments code. Released under CC0.
+derived from any Mutable Instruments code. `krell` implements the Krell patch, a technique rather
+than a product: a Buchla 266 Source of Uncertainty driving a Maths, named after the *Forbidden
+Planet* score. Released under CC0.
